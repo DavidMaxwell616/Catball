@@ -1,0 +1,326 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const { test } = require('node:test');
+
+const root = path.resolve(__dirname, '..');
+const levels = JSON.parse(fs.readFileSync(path.join(root, 'assets/levels.json'))).levels;
+const Vec2 = (x = 0, y = 0) => ({ x, y,
+    length() { return Math.hypot(this.x, this.y); },
+    mul(value) { this.x *= value; this.y *= value; }
+});
+const context = vm.createContext({
+    Phaser: { Scene: class {}, Math: { Vector2: class {} } },
+    planck: { Vec2 }, LEVELS: levels, completeLevel() {}
+});
+vm.runInContext(fs.readFileSync(path.join(root, 'js/cats.js'), 'utf8').replaceAll('export ', '') +
+    fs.readFileSync(path.join(root, 'js/GameScene.js'), 'utf8')
+        .replace(/^import .*;\r?\n/gm, '').replace('export class', 'class') +
+    '\nglobalThis.api = { GameScene, resolveCatRoles, catGeometry };', context);
+const { GameScene, resolveCatRoles, catGeometry } = context.api;
+
+function sceneFor(level) {
+    const scene = new GameScene();
+    scene.levelData = level;
+    scene.levelId = level.id;
+    scene.scale = { width: 1280, height: 800 };
+    const { sourceKey, targetKey } = resolveCatRoles(level);
+    scene.sourceCat = catGeometry(sourceKey, level.cats[sourceKey], level.cats[targetKey], level.ballSpawn);
+    scene.targetCat = catGeometry(targetKey, level.cats[targetKey], level.cats[sourceKey]);
+    const spawn = level.ballSpawn ?? scene.sourceCat.catchPoint;
+    let position = Vec2(spawn.x * 1280 / 30, spawn.y * 800 / 30);
+    let velocity = Vec2();
+    let type = 'dynamic';
+    scene.ballRadius = 16.5;
+    scene.ballPosition = { x: position.x * 30, y: position.y * 30 };
+    scene.ballBody = {
+        setType(value) { type = value; }, getType() { return type; },
+        setAwake() {},
+        setGravityScale(value) { this.gravity = value; },
+        setLinearVelocity(value) { velocity = value; }, getLinearVelocity() { return velocity; },
+        setAngularVelocity(value) { this.spin = value; }, getAngle() { return 0; },
+        getWorldCenter() { return position; },
+        applyLinearImpulse(value) { velocity = value; },
+        setTransform(value) { position = value; }, getPosition() { return position; }
+    };
+    scene.textHint = { setText(value) { this.text = value; } };
+    scene.sourceReleased = false;
+    scene.catchElapsed = null;
+    scene.loadedCatapult = null;
+    scene.catPassActive = false;
+    scene.teleporters = (level.teleporters ?? []).filter(portal => portal.destination).map(portal => ({
+        x: portal.x * 1280, y: portal.y * 800, radius: portal.size * 800 / 2, touching: false,
+        destination: { x: portal.destination.x * 1280, y: portal.destination.y * 800 }
+    }));
+    scene.arrowBoosts = [];
+    scene.timers = [];
+    scene.time = { addEvent(event) { scene.timers.push(event); } };
+    scene.tails = [];
+    scene.createCatTail = cat => {
+        const tail = { cat, setFrame(frame) { this.frame = frame; } };
+        scene.tails.push(tail);
+        return tail;
+    };
+    scene.world = {};
+    scene.syncBall = () => {
+        scene.ballPosition = { x: position.x * 30, y: position.y * 30 };
+    };
+    scene.finishCount = 0;
+    scene.finishLevel = () => { scene.finishCount++; scene.levelWon = true; };
+    return scene;
+}
+
+test('leaving any screen edge restarts the current level exactly once', () => {
+    for (const [x, y] of [[-18, 400], [1298, 400], [640, -18], [640, 818]]) {
+        const scene = sceneFor(levels[7]);
+        const restarts = [];
+        scene.scene = { restart: data => restarts.push(data.levelId) };
+        scene.ballBody.setTransform(Vec2(x / 30, y / 30));
+        scene.update(0, 16);
+        scene.update(16, 16);
+        assert.deepEqual(restarts, [8]);
+    }
+});
+
+test('visible balls and completed levels do not restart', () => {
+    const scene = sceneFor(levels[7]);
+    scene.scene = { restart() { assert.fail('unexpected restart'); } };
+    for (const [x, y] of [[-10, 400], [1290, 400], [640, -10], [640, 810], [640, 400]]) {
+        scene.ballBody.setTransform(Vec2(x / 30, y / 30));
+        assert.equal(scene.restartIfOutOfBounds(), false);
+    }
+    scene.levelWon = true;
+    scene.ballBody.setTransform(Vec2(-100, -100));
+    assert.equal(scene.restartIfOutOfBounds(), false);
+});
+
+for (const level of levels) {
+    for (const swap of [false, true]) {
+        test(`Level ${level.id}: throw and swept catch${swap ? ' with swapped colors' : ''}`, () => {
+            const data = structuredClone(level);
+            if (swap) {
+                for (const [key, cat] of Object.entries(data.cats)) {
+                    cat.color = key === 'black' ? 'white' : 'black';
+                }
+            }
+            const scene = sceneFor(data);
+            scene.passFromCat();
+            assert.equal(scene.sourceReleased, true);
+            assert.equal(scene.tails[0].cat.color, scene.sourceCat.color);
+            assert.match(scene.textHint.text, new RegExp(scene.targetCat.color));
+            const expectedType = data.pass?.mode === 'guided' ? 'kinematic' : 'dynamic';
+            assert.equal(scene.ballBody.getType(), expectedType);
+            if (expectedType === 'dynamic') {
+                assert.equal(Math.sign(scene.ballBody.getLinearVelocity().x), scene.sourceCat.direction);
+                assert.equal(scene.ballBody.gravity, 1);
+            }
+            scene.passFromCat();
+            assert.equal(scene.timers.length, 1, 'source releases only once');
+            const target = scene.targetCat.catchPoint;
+            const x = target.x * 1280;
+            const y = target.y * 800;
+            scene.ballBody.setTransform(Vec2((x + 240) / 30, y / 30));
+            scene.checkReceivingCat({ x: x - 240, y });
+            assert.equal(scene.catchElapsed, 0, 'fast ball crossing the target must be caught');
+            assert.equal(scene.receivingTail.cat.color, scene.targetCat.color);
+            assert.equal(scene.ballBody.getType(), 'static');
+            assert.equal(scene.receivingTail.frame, 'tail-3');
+            assert.equal(scene.ballBody.getPosition().x * 30, x);
+            scene.onPointerDown({ x, y });
+            assert.equal(scene.dragging, false, 'cannot drag during catch');
+            scene.update(0, 80);
+            assert.equal(scene.receivingTail.frame, 'tail-2');
+            scene.update(80, 80);
+            assert.equal(scene.finishCount, 0);
+            scene.update(160, 80);
+            assert.equal(scene.receivingTail.frame, 'tail-0');
+            assert.equal(scene.finishCount, 1);
+        });
+    }
+}
+
+test('explicit roles support arbitrary identifiers and identical colors', () => {
+    const level = { id: 99, sourceCat: 'first', targetCat: 'second', cats: {
+        first: { color: 'white', x: 0.2, groundY: 0.9 },
+        second: { color: 'white', x: 0.8, groundY: 0.9 }
+    } };
+    const scene = sceneFor(level);
+    scene.passFromCat();
+    assert.equal(scene.sourceCat.key, 'first');
+    assert.equal(scene.targetCat.key, 'second');
+    assert.equal(scene.sourceCat.color, scene.targetCat.color);
+    assert.throws(() => resolveCatRoles({ ...level, targetCat: 'first' }));
+});
+
+test('catch ignores unreleased balls, dragging, catapult loading, and distant misses', () => {
+    const scene = sceneFor(levels[5]);
+    const x = scene.targetCat.catchPoint.x * 1280;
+    const y = scene.targetCat.catchPoint.y * 800;
+    scene.ballBody.setTransform(Vec2(x / 30, y / 30));
+    scene.checkReceivingCat({ x, y });
+    assert.equal(scene.catchElapsed, null);
+    scene.sourceReleased = true;
+    scene.dragging = true;
+    scene.checkReceivingCat({ x, y });
+    assert.equal(scene.catchElapsed, null);
+    scene.dragging = false;
+    scene.loadedCatapult = {};
+    scene.checkReceivingCat({ x, y });
+    assert.equal(scene.catchElapsed, null);
+    scene.loadedCatapult = null;
+    scene.ballBody.setTransform(Vec2(x / 30, (y - 300) / 30));
+    scene.checkReceivingCat({ x, y: y - 400 });
+    assert.equal(scene.catchElapsed, null);
+});
+
+test('body hits catch even when the sweep misses the tail curl', () => {
+    const scene = sceneFor(levels[5]);
+    scene.passFromCat();
+    const x = scene.targetCat.x * 1280;
+    const y = (scene.targetCat.groundY - 0.13) * 800;
+    scene.ballBody.setTransform(Vec2((x + 300) / 30, y / 30));
+    scene.checkReceivingCat({ x: x - 300, y });
+    assert.equal(scene.catchElapsed, 0);
+});
+
+test('dragging the initial ball releases its source tail and prevents a second cat throw', () => {
+    const scene = sceneFor(levels[5]);
+    const pointer = { ...scene.ballPosition };
+    scene.onPointerDown(pointer);
+    assert.equal(scene.dragging, true);
+    assert.equal(scene.sourceReleased, false);
+    scene.onPointerUp({ x: pointer.x + 100, y: pointer.y + 20 });
+    assert.equal(scene.sourceReleased, true);
+    assert.equal(scene.dragging, false);
+    assert.equal(scene.ballBody.gravity, 1);
+    assert.ok(scene.ballBody.getLinearVelocity().x < 0);
+    scene.passFromCat();
+    assert.equal(scene.timers.length, 1);
+    const timer = scene.timers[0];
+    for (let frame = 0; frame <= timer.repeat; frame++) timer.callback();
+    assert.equal(scene.sourceTail.frame, 'tail-0');
+});
+
+test('tail sprites use their cat color, orientation, and configured artwork patch', () => {
+    const scene = sceneFor(levels[5]);
+    const sprites = [];
+    const frames = new Set();
+    const texture = { has: key => frames.has(key), add: key => frames.add(key) };
+    scene.textures = {
+        get(key) {
+            return key.startsWith('level-') ? { getSourceImage: () => ({ width: 2025, height: 1351 }) } : texture;
+        },
+        exists: () => false,
+        createCanvas: () => ({ context: { drawImage() {} }, refresh() {} })
+    };
+    scene.add = { image(x, y, key) {
+        const sprite = { x, y, key,
+            setOrigin() { return this; }, setDisplaySize() { return this; },
+            setDepth() { return this; }, setFlipX(value) { this.flipX = value; return this; }
+        };
+        sprites.push(sprite);
+        return sprite;
+    } };
+    for (const cat of [scene.sourceCat, scene.targetCat]) {
+        const sprite = GameScene.prototype.createCatTail.call(scene, cat);
+        assert.equal(sprite.key, `${cat.color}-cat`);
+        assert.equal(sprite.flipX, cat.tail.flipX);
+        assert.equal(sprite.x, cat.tail.x * 1280);
+    }
+    assert.equal(sprites.length, 4);
+    assert.equal(frames.size, 4);
+});
+
+for (const direction of [-1, 1]) {
+    test(`guided pass catches when traveling ${direction < 0 ? 'left' : 'right'}`, () => {
+        const scene = sceneFor({ id: 42, pass: { mode: 'guided' }, cats: {
+            black: { x: direction > 0 ? 0.2 : 0.8, groundY: 0.9 },
+            white: { x: direction > 0 ? 0.8 : 0.2, groundY: 0.9 }
+        } });
+        scene.passFromCat();
+        for (let frame = 0; frame < 300 && !scene.levelWon; frame++) scene.update(frame * 16, 16);
+        assert.equal(scene.levelWon, true);
+        assert.equal(scene.finishCount, 1);
+    });
+}
+
+for (const angle of [235, 285, 335]) {
+    test(`oscillating arrow boosts a swept ball in its current ${angle} degree direction`, () => {
+        const scene = sceneFor(levels[7]);
+        const config = { x: 0.5, y: 0.5, size: 0.09 };
+        const sprite = { x: config.x * 1280, y: config.y * 800, rotation: angle * Math.PI / 180 };
+        const arrow = { sprite, radius: config.size * 800 / 2, boostSpeed: 12, touching: false };
+        scene.arrowBoosts = [arrow];
+        scene.ballBody.setLinearVelocity(Vec2(3, 4));
+        scene.ballBody.setTransform(Vec2(sprite.x / 30, sprite.y / 30));
+        scene.applyArrowBoosts({ x: sprite.x - 200, y: sprite.y });
+        const velocity = scene.ballBody.getLinearVelocity();
+        assert.ok(Math.abs(velocity.x - Math.cos(sprite.rotation) * 17) < 1e-9);
+        assert.ok(Math.abs(velocity.y - Math.sin(sprite.rotation) * 17) < 1e-9);
+        sprite.rotation += 0.1;
+        scene.applyArrowBoosts(sprite);
+        assert.equal(scene.ballBody.getLinearVelocity(), velocity, 'overlap must not boost repeatedly');
+        scene.ballBody.setTransform(Vec2((sprite.x + 200) / 30, sprite.y / 30));
+        scene.applyArrowBoosts(sprite);
+        scene.ballBody.setTransform(Vec2((sprite.x - 200) / 30, sprite.y / 30));
+        scene.applyArrowBoosts({ x: sprite.x + 200, y: sprite.y });
+        assert.ok(Math.abs(scene.ballBody.getLinearVelocity().length() - 29) < 1e-9,
+            'a fast crossing after leaving boosts again');
+    });
+}
+
+test('manual restart preserves moved arrow positions without leaking them into a new level', () => {
+    const scene = sceneFor(levels[8]);
+    scene.arrowBoosts = [{ sprite: { x: 320, y: 600 } }, { sprite: { x: 960, y: 200 } }];
+    let restartData;
+    scene.scene = { restart(data) { restartData = data; } };
+    scene.restartWithArrowPositions();
+    assert.equal(restartData.levelId, 9);
+    assert.equal(restartData.arrowPositions[0].x, 0.25);
+    assert.equal(restartData.arrowPositions[0].y, 0.75);
+    assert.equal(restartData.arrowPositions[1].x, 0.75);
+    assert.equal(restartData.arrowPositions[1].y, 0.25);
+    scene.init(restartData);
+    assert.equal(scene.savedArrowPositions, restartData.arrowPositions);
+    scene.init({ levelId: 10 });
+    assert.equal(scene.savedArrowPositions.length, 0);
+});
+
+test('Level 6 teleports a fast crossing ball to 75% width and height without changing momentum', () => {
+    const scene = sceneFor(levels[5]);
+    scene.passFromCat();
+    const portal = scene.teleporters[0];
+    const velocity = scene.ballBody.getLinearVelocity();
+    const spin = scene.ballBody.spin;
+    scene.ballBody.setTransform(Vec2((portal.x + 200) / 30, portal.y / 30));
+    const from = scene.applyTeleporters({ x: portal.x - 200, y: portal.y });
+    assert.equal(from.x, 960);
+    assert.equal(from.y, 600);
+    assert.equal(scene.ballBody.getPosition().x * 30, 960);
+    assert.equal(scene.ballBody.getPosition().y * 30, 600);
+    assert.equal(scene.ballBody.getLinearVelocity(), velocity);
+    assert.equal(scene.ballBody.spin, spin);
+    assert.equal(scene.ballPosition.x, 960, 'trail starts at exit, not entrance');
+    assert.equal(scene.trackDistance, 0);
+});
+
+test('teleporters ignore misses and dragging, and cannot loop while overlapping an exit', () => {
+    const scene = sceneFor(levels[5]);
+    scene.passFromCat();
+    const portal = scene.teleporters[0];
+    scene.ballBody.setTransform(Vec2(portal.x / 30, (portal.y + 200) / 30));
+    const miss = { x: portal.x - 200, y: portal.y + 200 };
+    assert.equal(scene.applyTeleporters(miss), miss);
+    scene.ballBody.setTransform(Vec2(portal.x / 30, portal.y / 30));
+    scene.dragging = true;
+    const from = { x: portal.x, y: portal.y };
+    assert.equal(scene.applyTeleporters(from), from);
+    scene.dragging = false;
+    scene.teleporters.push({ x: 960, y: 600, radius: 60, touching: false,
+        destination: { x: 100, y: 100 } });
+    const exit = scene.applyTeleporters(from);
+    assert.equal(scene.teleporters[1].touching, true);
+    assert.equal(scene.applyTeleporters(exit), exit);
+    assert.equal(scene.ballBody.getPosition().x * 30, 960);
+});
