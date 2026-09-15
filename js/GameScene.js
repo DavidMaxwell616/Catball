@@ -46,6 +46,7 @@ export class GameScene extends Phaser.Scene {
         this.load.image('trap-door', 'assets/images/trap door.png');
         this.load.image('catapult', 'assets/images/catapult.png');
         this.load.image('spinner', 'assets/images/spinner.png');
+        this.load.json('spinner-geometry', 'assets/spinner-geometry.json');
         this.load.spritesheet('trigger', 'assets/images/trigger.png', { frameWidth: 90, frameHeight: 41 });
         this.load.spritesheet('teleporter', 'assets/images/teleporter.png', { frameWidth: 400, frameHeight: 400 });
     }
@@ -66,12 +67,14 @@ export class GameScene extends Phaser.Scene {
         this.ballCourse = [];
         this.arrowBoosts = [];
         this.teleporters = [];
+        this.spinnerBodies = [];
         this.triggerBounds = [];
         this.trapDoors = [];
         this.pendingTrapDoors = new Set();
         this.pendingCatapults = new Set();
         this.loadedCatapult = null;
         this.receivingTail = null;
+        this.receivingTails = new Map();
         this.catchElapsed = null;
         this.platformBodies = [];
 
@@ -149,6 +152,14 @@ export class GameScene extends Phaser.Scene {
             graphics.strokePoints(bounds, true);
         }
         graphics.lineStyle(2, 0x66ff66, 0.9);
+        for (const { body, contours } of this.spinnerBodies) {
+            for (const contour of contours) {
+                graphics.strokePoints(contour.map(point => {
+                    const world = body.getWorldPoint(point);
+                    return { x: world.x * this.SCALE, y: world.y * this.SCALE };
+                }), true);
+            }
+        }
         for (const door of this.trapDoors) {
             if (!door.open) graphics.strokeRect(door.x, door.y, door.width, door.height);
         }
@@ -255,10 +266,11 @@ export class GameScene extends Phaser.Scene {
             fixture.setUserData({ triggerSprite: sprite, trapdoorId: trigger.trapdoorId });
             this.triggerBounds.push(points);
         }
-        const { sourceKey, targetKey } = resolveCatRoles(this.levelData);
+        const { sourceKey, targetKey, targetKeys } = resolveCatRoles(this.levelData);
         const cats = this.levelData.cats;
         this.sourceCat = catGeometry(sourceKey, cats[sourceKey], cats[targetKey], this.levelData.ballSpawn);
-        this.targetCat = catGeometry(targetKey, cats[targetKey], cats[sourceKey]);
+        this.targetCats = targetKeys.map(key => catGeometry(key, cats[key], cats[sourceKey]));
+        this.targetCat = this.targetCats[0];
         const spawn = this.levelData.ballSpawn ?? this.sourceCat.catchPoint;
         this.createBall(spawn.x * w, spawn.y * h, (spawn.radius ?? 0.01375) * Math.min(w, h));
         this.goalZone = { x: this.targetCat.x * w, y: this.targetCat.groundY * h - 50, width: 90, height: 100 };
@@ -273,20 +285,58 @@ export class GameScene extends Phaser.Scene {
     createSpinners() {
         const w = this.scale.width;
         const h = this.scale.height;
+        if (!this.levelData.spinners?.length) return;
+        const geometry = this.cache.json.get('spinner-geometry');
+        // Earcut preserves concave blade edges and the transparent center hole.
+        const indices = Phaser.Geom.Polygon.Earcut(geometry.vertices, geometry.holes, 2);
         for (const config of this.levelData.spinners || []) {
             const size = (config.size ?? 0.24) * Math.min(w, h);
             const sprite = this.add.image(config.x * w, config.y * h, 'spinner')
                 .setDisplaySize(size, size).setDepth(0);
-            this.tweens.add({
-                targets: sprite, x: config.toX * w,
-                duration: config.moveDuration ?? 2400,
-                ease: 'Sine.easeInOut', yoyo: true, repeat: -1
+            // Kinematic spinners push the ball without being displaced by impacts.
+            const body = this.world.createKinematicBody({
+                position: planck.Vec2(sprite.x / this.SCALE, sprite.y / this.SCALE)
             });
+            const points = [];
+            for (let i = 0; i < geometry.vertices.length; i += 2) {
+                points.push(planck.Vec2(geometry.vertices[i] * size / this.SCALE,
+                    geometry.vertices[i + 1] * size / this.SCALE));
+            }
+            for (let i = 0; i < indices.length; i += 3) {
+                body.createFixture(planck.Polygon(indices.slice(i, i + 3).map(index => points[index])), {
+                    friction: 0.7, restitution: 0.45
+                });
+            }
+            const boundaries = [0, ...geometry.holes, points.length];
+            const contours = boundaries.slice(0, -1).map((start, i) => points.slice(start, boundaries[i + 1]));
+            this.spinnerBodies.push({ sprite, body, contours });
+            const moveDuration = config.moveDuration ?? 2400;
+            if (moveDuration > 0 && Number.isFinite(config.toX) && config.toX !== config.x) {
+                this.tweens.add({
+                    targets: sprite, x: config.toX * w,
+                    duration: moveDuration,
+                    ease: 'Sine.easeInOut', yoyo: true, repeat: -1
+                });
+            }
             this.tweens.add({
                 targets: sprite, rotation: (config.clockwise === false ? -1 : 1) * Math.PI * 2,
                 duration: config.rotationDuration ?? 1600,
                 ease: 'Linear', repeat: -1
             });
+        }
+    }
+
+    syncSpinnerBodies(dt) {
+        for (const { sprite, body } of this.spinnerBodies) {
+            const position = body.getPosition();
+            // Reach the tween's current pose during the next physics step, so
+            // contacts receive the spinner's linear and angular velocity.
+            body.setLinearVelocity(planck.Vec2(
+                (sprite.x / this.SCALE - position.x) / dt,
+                (sprite.y / this.SCALE - position.y) / dt
+            ));
+            const angleDelta = sprite.rotation - body.getAngle();
+            body.setAngularVelocity(Math.atan2(Math.sin(angleDelta), Math.cos(angleDelta)) / dt);
         }
     }
 
@@ -497,7 +547,9 @@ export class GameScene extends Phaser.Scene {
             delay: 65, repeat: frames.length - 1,
             callback: () => this.sourceTail.setFrame(`tail-${frames[frame++]}`)
         });
-        this.textHint.setText(`Pass the ball to the ${this.targetCat.color} cat`);
+        this.textHint.setText(this.targetCats.length > 1
+            ? 'Pass the ball to any target cat'
+            : `Pass the ball to the ${this.targetCat.color} cat`);
     }
 
     passFromCat() {
@@ -519,8 +571,9 @@ export class GameScene extends Phaser.Scene {
         }
     }
 
-    openReceivingTail() {
-        if (!this.receivingTail) this.receivingTail = this.createCatTail(this.targetCat);
+    openReceivingTail(cat = this.targetCat) {
+        if (!this.receivingTails.has(cat.key)) this.receivingTails.set(cat.key, this.createCatTail(cat));
+        this.receivingTail = this.receivingTails.get(cat.key);
     }
 
     createUI() {
@@ -710,6 +763,7 @@ export class GameScene extends Phaser.Scene {
         const dt = 1 / 60;
         const previous = this.ballBody.getPosition();
         const from = { x: previous.x * this.SCALE, y: previous.y * this.SCALE };
+        this.syncSpinnerBodies(dt);
         this.world.step(dt);
         this.openTriggeredTrapDoors();
         this.activateCatapults();
@@ -731,7 +785,7 @@ export class GameScene extends Phaser.Scene {
         if (x + radius < 0 || x - radius > this.scale.width ||
             y + radius < 0 || y - radius > this.scale.height) {
             this.restarting = true;
-            this.scene.restart({ levelId: this.levelId });
+            this.restartWithArrowPositions();
             return true;
         }
         return false;
@@ -739,9 +793,16 @@ export class GameScene extends Phaser.Scene {
 
     checkReceivingCat(from) {
         if (!this.sourceReleased || this.loadedCatapult || this.levelWon || this.dragging || this.catchElapsed !== null) return;
+        for (const cat of this.targetCats) {
+            this.checkReceivingTarget(from, cat);
+            if (this.catchElapsed !== null) break;
+        }
+    }
+
+    checkReceivingTarget(from, cat) {
         const target = {
-            x: this.targetCat.catchPoint.x * this.scale.width,
-            y: this.targetCat.catchPoint.y * this.scale.height
+            x: cat.catchPoint.x * this.scale.width,
+            y: cat.catchPoint.y * this.scale.height
         };
         const position = this.ballBody.getPosition();
         const x = position.x * this.SCALE;
@@ -753,9 +814,9 @@ export class GameScene extends Phaser.Scene {
         const t = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1,
             ((target.x - from.x) * dx + (target.y - from.y) * dy) / lengthSquared));
         const closest = Math.hypot(from.x + dx * t - target.x, from.y + dy * t - target.y);
-        const bodyHit = this.hitsReceivingCat(from, { x, y });
+        const bodyHit = this.hitsReceivingCat(from, { x, y }, cat);
         if (closest > 160 && !bodyHit) return;
-        this.openReceivingTail();
+        this.openReceivingTail(cat);
         this.receivingTail.setFrame(`tail-${Math.min(3, Math.max(0, Math.floor((160 - distance) / 35)))}`);
         if (closest <= this.ballRadius + 10 || bodyHit) {
             this.ballBody.setLinearVelocity(planck.Vec2(0, 0));
@@ -768,8 +829,7 @@ export class GameScene extends Phaser.Scene {
         }
     }
 
-    hitsReceivingCat(from, to) {
-        const cat = this.targetCat;
+    hitsReceivingCat(from, to, cat = this.targetCat) {
         const centerX = cat.x * this.scale.width;
         const groundY = cat.groundY * this.scale.height;
         // Sweep against the cat's body, expanded by the ball radius.

@@ -8,7 +8,17 @@
     ['Shredders', 'Find sharp, precise bounce angles in close quarters.'],
     ['Timing is Key', 'Release at just the right moment to pass moving parts.'],
     ['Aim for Success', 'Choose your path and aim accurately for the destination.'],
-    ['Any Cat', 'Use strategic redirection to solve a complex layout.']
+    ['Any Cat', 'Use strategic redirection to solve a complex layout.'],
+    ['Central Pillar', 'Pass around the central pillar to the cat on the right shelf.'],
+    ['Floating Steps', 'Find a route between the floating platforms.'],
+    ['High Shelf', 'Pass from the high shelf to the cat below.'],
+    ['Around the Tower', 'Navigate around the tower to reach the upper ledge.'],
+    ['Across the Divide', 'Cross the gap between the upper and lower paths.'],
+    ['Green Heights', 'Connect the two platforms in the green cavern.'],
+    ['Balancing Act', 'Pass from the upper ledge through the layered cavern.'],
+    ['Over and Under', 'Work around the wide platform to reach the lower cat.'],
+    ['Wide Gap', 'Carry the ball across the gap between the two islands.'],
+    ['Final Ascent', 'Reach the cat waiting on the raised platform.']
 ].map(([title, description], index) => ({ id: index + 1, title, description, playable: true }));
 
 const KEY = 'cat-physics-completed';

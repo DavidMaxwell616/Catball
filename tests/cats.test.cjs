@@ -6,13 +6,16 @@ const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const levels = JSON.parse(fs.readFileSync(path.join(root, 'assets/levels.json'))).levels;
+const spinnerGeometry = JSON.parse(fs.readFileSync(path.join(root, 'assets/spinner-geometry.json')));
+// Use the actual Phaser triangulator when supplied for integration checks.
+const triangulate = process.env.PHASER_EARCUT_PATH ? require(process.env.PHASER_EARCUT_PATH) : () => [0, 1, 2];
 const Vec2 = (x = 0, y = 0) => ({ x, y,
     length() { return Math.hypot(this.x, this.y); },
     mul(value) { this.x *= value; this.y *= value; }
 });
 const context = vm.createContext({
-    Phaser: { Scene: class {}, Math: { Vector2: class {} } },
-    planck: { Vec2 }, LEVELS: levels, completeLevel() {}
+    Phaser: { Scene: class {}, Math: { Vector2: class {} }, Geom: { Polygon: { Earcut: triangulate } } },
+    planck: { Vec2, Circle: radius => ({ radius }), Polygon: points => ({ points }) }, LEVELS: levels, completeLevel() {}
 });
 vm.runInContext(fs.readFileSync(path.join(root, 'js/cats.js'), 'utf8').replaceAll('export ', '') +
     fs.readFileSync(path.join(root, 'js/GameScene.js'), 'utf8')
@@ -25,9 +28,11 @@ function sceneFor(level) {
     scene.levelData = level;
     scene.levelId = level.id;
     scene.scale = { width: 1280, height: 800 };
-    const { sourceKey, targetKey } = resolveCatRoles(level);
+    const { sourceKey, targetKey, targetKeys } = resolveCatRoles(level);
     scene.sourceCat = catGeometry(sourceKey, level.cats[sourceKey], level.cats[targetKey], level.ballSpawn);
-    scene.targetCat = catGeometry(targetKey, level.cats[targetKey], level.cats[sourceKey]);
+    scene.targetCats = targetKeys.map(key => catGeometry(key, level.cats[key], level.cats[sourceKey]));
+    scene.targetCat = scene.targetCats[0];
+    scene.receivingTails = new Map();
     const spawn = level.ballSpawn ?? scene.sourceCat.catchPoint;
     let position = Vec2(spawn.x * 1280 / 30, spawn.y * 800 / 30);
     let velocity = Vec2();
@@ -54,6 +59,7 @@ function sceneFor(level) {
         destination: { x: portal.destination.x * 1280, y: portal.destination.y * 800 }
     }));
     scene.arrowBoosts = [];
+    scene.spinnerBodies = [];
     scene.timers = [];
     scene.time = { addEvent(event) { scene.timers.push(event); } };
     scene.tails = [];
@@ -75,7 +81,12 @@ test('leaving any screen edge restarts the current level exactly once', () => {
     for (const [x, y] of [[-18, 400], [1298, 400], [640, -18], [640, 818]]) {
         const scene = sceneFor(levels[7]);
         const restarts = [];
-        scene.scene = { restart: data => restarts.push(data.levelId) };
+        scene.arrowBoosts = [{ sprite: { x: 320, y: 600 } }];
+        scene.scene = { restart: data => {
+            restarts.push(data.levelId);
+            assert.equal(data.arrowPositions[0].x, 0.25);
+            assert.equal(data.arrowPositions[0].y, 0.75);
+        } };
         scene.ballBody.setTransform(Vec2(x / 30, y / 30));
         scene.update(0, 16);
         scene.update(16, 16);
@@ -108,7 +119,7 @@ for (const level of levels) {
             scene.passFromCat();
             assert.equal(scene.sourceReleased, true);
             assert.equal(scene.tails[0].cat.color, scene.sourceCat.color);
-            assert.match(scene.textHint.text, new RegExp(scene.targetCat.color));
+            assert.match(scene.textHint.text, new RegExp(scene.targetCats.length > 1 ? 'any target cat' : scene.targetCat.color));
             const expectedType = data.pass?.mode === 'guided' ? 'kinematic' : 'dynamic';
             assert.equal(scene.ballBody.getType(), expectedType);
             if (expectedType === 'dynamic') {
@@ -126,7 +137,7 @@ for (const level of levels) {
             assert.equal(scene.receivingTail.cat.color, scene.targetCat.color);
             assert.equal(scene.ballBody.getType(), 'static');
             assert.equal(scene.receivingTail.frame, 'tail-3');
-            assert.equal(scene.ballBody.getPosition().x * 30, x);
+            assert.ok(Math.abs(scene.ballBody.getPosition().x * 30 - x) < 1e-9);
             scene.onPointerDown({ x, y });
             assert.equal(scene.dragging, false, 'cannot drag during catch');
             scene.update(0, 80);
@@ -269,6 +280,66 @@ for (const angle of [235, 285, 335]) {
             'a fast crossing after leaving boosts again');
     });
 }
+
+for (const key of ['black', 'black-middle', 'black-bottom']) {
+    test(`Level 10 completes when ${key} catches the ball`, () => {
+        const scene = sceneFor(levels.find(level => level.id === 10));
+        scene.passFromCat();
+        assert.equal(scene.sourceCat.key, 'white');
+        assert.equal(scene.targetCats.length, 3);
+        const cat = scene.targetCats.find(cat => cat.key === key);
+        const x = cat.catchPoint.x * 1280;
+        const y = cat.catchPoint.y * 800;
+        scene.ballBody.setTransform(Vec2((x + 50) / 30, y / 30));
+        scene.checkReceivingCat({ x: x - 100, y });
+        assert.equal(scene.catchElapsed, 0);
+        assert.equal(scene.receivingTail.cat.key, key);
+        assert.equal(scene.receivingTail.cat.color, 'black');
+        for (let i = 0; i < 3; i++) scene.update(i * 80, 80);
+        assert.equal(scene.finishCount, 1);
+    });
+}
+
+test('Level 10 spinners rotate without horizontal travel; Level 7 spinners still travel', () => {
+    for (const id of [7, 10]) {
+        const scene = sceneFor(levels.find(level => level.id === id));
+        const tweens = [];
+        scene.cache = { json: { get: () => spinnerGeometry } };
+        scene.world.createKinematicBody = ({ position }) => ({
+            fixtures: [],
+            getPosition: () => position, getAngle: () => 0,
+            createFixture(shape, options) { this.fixtures.push({ shape, options }); },
+            setLinearVelocity(value) { this.velocity = value; },
+            setAngularVelocity(value) { this.spin = value; }
+        });
+        scene.add = { image(x, y) {
+            return { x, y, rotation: 0, setDisplaySize() { return this; }, setDepth() { return this; } };
+        } };
+        scene.tweens = { add: config => tweens.push(config) };
+        scene.createSpinners();
+        const count = scene.levelData.spinners.length;
+        assert.ok(count > 0);
+        assert.equal(tweens.filter(tween => 'rotation' in tween).length, count);
+        assert.equal(tweens.filter(tween => 'x' in tween).length, id === 10 ? 0 : count);
+        assert.equal(scene.spinnerBodies.length, count);
+        for (const { sprite, body, contours } of scene.spinnerBodies) {
+            assert.equal(contours.length, 2, 'retain the outer blade outline and center hole');
+            assert.ok(body.fixtures.length > 0);
+            for (const { shape, options } of body.fixtures) {
+                assert.equal(shape.points.length, 3);
+                assert.notEqual(options.isSensor, true);
+                const [a, b, c] = shape.points;
+                assert.ok(Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) > 1e-8);
+            }
+            sprite.x += 6;
+            sprite.rotation = Math.PI * 2 - 0.1;
+            scene.syncSpinnerBodies(1 / 60);
+            assert.ok(Math.abs(body.velocity.x - 12) < 1e-9);
+            assert.equal(body.velocity.y, 0);
+            assert.ok(Math.abs(body.spin + 6) < 1e-9, 'rotation wraps without a full-turn velocity spike');
+        }
+    }
+});
 
 test('manual restart preserves moved arrow positions without leaking them into a new level', () => {
     const scene = sceneFor(levels[8]);

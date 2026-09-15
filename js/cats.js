@@ -1,12 +1,13 @@
 // Cat identity selects a role; color only selects artwork and hint text.
 export function resolveCatRoles(level) {
     const keys = Object.keys(level.cats);
-    const sourceKey = level.sourceCat ?? keys.find(key => key !== (level.targetCat ?? 'white'));
-    const targetKey = level.targetCat ?? keys.find(key => key !== sourceKey);
-    if (!level.cats[sourceKey] || !level.cats[targetKey] || sourceKey === targetKey) {
+    const sourceKey = level.sourceCat ?? keys.find(key => !(level.targetCats ?? [level.targetCat ?? 'white']).includes(key));
+    const targetKeys = level.targetCats ?? [level.targetCat ?? keys.find(key => key !== sourceKey)];
+    const targetKey = targetKeys[0];
+    if (!level.cats[sourceKey] || !targetKeys.length || targetKeys.some(key => !level.cats[key] || sourceKey === key)) {
         throw new Error('A level must have distinct source and target cats');
     }
-    return { sourceKey, targetKey };
+    return { sourceKey, targetKey, targetKeys };
 }
 
 export function catGeometry(key, cat, other, spawn) {
