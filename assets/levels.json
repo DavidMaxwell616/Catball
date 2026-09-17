@@ -11337,7 +11337,7 @@
       "targetCat": "black",
       "sourceImage": "assets/images/levels/Level 20.png",
       "bumps": [{ "x": 0.24, "y": 0.902 }],
-      "snakes": [{ "x": 0.45, "y": 0.95, "segmentWidth": 30, "amplitude": 180, "duration": 4000 }],
+      "snakes": [{ "x": 0.45, "y": 0.95, "segmentWidth": 30, "amplitude": 140, "duration": 4000 }],
       "sourceImageSize": {
         "width": 2880,
         "height": 1620
