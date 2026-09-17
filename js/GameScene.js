@@ -1,6 +1,7 @@
 ﻿
-import { LEVELS, isUnlocked, completeLevel } from './levels.js';
 import { resolveCatRoles, catGeometry } from './cats.js';
+import { Seesaw } from './Seesaw.js';
+import { Snake } from './Snake.js';
 
 export class GameScene extends Phaser.Scene {
     constructor() {
@@ -22,6 +23,11 @@ export class GameScene extends Phaser.Scene {
         this.levelWon = false;
 
         this.platformBodies = [];
+        this.seesaws = [];
+        this.snakes = [];
+        this.glassFloors = [];
+        this.glassShards = [];
+        this.pendingGlassFloors = new Set();
 
         this.textTitle = null;
         this.textHint = null;
@@ -29,12 +35,12 @@ export class GameScene extends Phaser.Scene {
     }
 
     init(data = {}) {
-        this.levelId = data.levelId ?? this.levelId ?? 1;
+        this.levelId = data.levelId ?? globalThis.LEVEL_NUMBER ?? 1;
+        globalThis.LEVEL_NUMBER = this.levelId;
         this.savedArrowPositions = data.arrowPositions ?? [];
     }
 
     preload() {
-        this.load.json('level-layouts', 'assets/levels.json');
         this.load.image(`level-${this.levelId}`, `assets/images/levels/Level ${this.levelId}.png`);
         this.load.image('ball', 'assets/images/ball.png');
         this.load.image('black-cat', 'assets/images/black cat.png');
@@ -43,16 +49,23 @@ export class GameScene extends Phaser.Scene {
         this.load.image('track-mark-green', 'assets/images/track mark green.png');
         this.load.image('arrow', 'assets/images/arrow.png');
         this.load.image('bump', 'assets/images/bump.png');
+        this.load.image('teeter-totter', 'assets/images/teeter-totter.png');
         this.load.image('trap-door', 'assets/images/trap door.png');
         this.load.image('catapult', 'assets/images/catapult.png');
+        this.load.image('glass-floor', 'assets/images/glass floor.png');
+        this.load.image('glass-wall', 'assets/images/glass wall.png');
+        this.load.image('flipper', 'assets/images/flipper.png');
+        this.load.image('snake-segment', 'assets/images/snake segment.png');
         this.load.image('spinner', 'assets/images/spinner.png');
         this.load.json('spinner-geometry', 'assets/spinner-geometry.json');
+        this.load.image('windmill', 'assets/images/windmill.png');
+        this.load.json('windmill-geometry', 'assets/windmill-geometry.json');
         this.load.spritesheet('trigger', 'assets/images/trigger.png', { frameWidth: 90, frameHeight: 41 });
         this.load.spritesheet('teleporter', 'assets/images/teleporter.png', { frameWidth: 400, frameHeight: 400 });
     }
 
     create() {
-        this.levelData = this.cache.json.get('level-layouts')?.levels.find(level => level.id === this.levelId);
+        this.levelData = LEVELS.find(level => level.id === this.levelId);
         if (!this.levelData || !isUnlocked(this.levelId)) {
             this.scene.start('HubScene');
             return;
@@ -68,9 +81,15 @@ export class GameScene extends Phaser.Scene {
         this.arrowBoosts = [];
         this.teleporters = [];
         this.spinnerBodies = [];
+        this.bumps = [];
+        this.snakes = [];
+        this.seesaws = [];
         this.triggerBounds = [];
         this.trapDoors = [];
         this.pendingTrapDoors = new Set();
+        this.glassShards = [];
+        this.glassFloors = [];
+        this.pendingGlassFloors = new Set();
         this.pendingCatapults = new Set();
         this.loadedCatapult = null;
         this.receivingTail = null;
@@ -120,6 +139,7 @@ export class GameScene extends Phaser.Scene {
             }
             // Defer body removal until after Planck finishes its collision step.
             if (trigger?.trapdoorId) this.pendingTrapDoors.add(trigger.trapdoorId);
+            if (trigger?.glassFloor && !trigger.glassFloor.broken) this.pendingGlassFloors.add(trigger.glassFloor);
             if (trigger?.catapult && !trigger.catapult.busy) this.pendingCatapults.add(trigger.catapult);
         });
     }
@@ -136,13 +156,19 @@ export class GameScene extends Phaser.Scene {
         const w = this.scale.width;
         const h = this.scale.height;
         graphics.clear().lineStyle(2, 0x66ff66, 0.9);
-        for (const shape of [...this.levelData.groundShapes, ...(this.levelData.bumps || [])]) {
+        for (const shape of this.levelData.groundShapes) {
             graphics.beginPath();
             shape.points.forEach(([x, y], i) => {
                 if (i === 0) graphics.moveTo(x * w, y * h);
                 else graphics.lineTo(x * w, y * h);
             });
             graphics.closePath().strokePath();
+        }
+        for (const bump of this.bumps) graphics.strokePoints(bump.points, true);
+        for (const seesaw of this.seesaws) seesaw.drawDebug(graphics);
+        for (const snake of this.snakes) snake.drawDebug(graphics);
+        for (const floor of this.glassFloors) {
+            if (!floor.broken) graphics.strokeRect(floor.x - floor.width / 2, floor.y, floor.width, floor.height);
         }
         const pos = this.ballBody.getPosition();
         const x = pos.x * this.SCALE;
@@ -182,7 +208,7 @@ export class GameScene extends Phaser.Scene {
     createLevel() {
         const w = this.scale.width;
         const h = this.scale.height;
-        for (const shape of [...this.levelData.groundShapes, ...(this.levelData.bumps || [])]) {
+        for (const shape of this.levelData.groundShapes) {
             const points = shape.points.map(([x, y]) => ({ x: x * w, y: y * h }));
             if (shape.texture) {
                 const left = Math.min(...points.map(point => point.x));
@@ -203,6 +229,9 @@ export class GameScene extends Phaser.Scene {
             });
             this.platformBodies.push(body);
         }
+        this.bumps = (this.levelData.bumps || []).map(position => this.createBump(position));
+        this.seesaws = (this.levelData.seesaws || []).map(position => new Seesaw(this, position));
+        this.snakes = (this.levelData.snakes || []).map(config => new Snake(this, config));
         for (const [index, arrow] of (this.levelData.arrows || []).entries()) {
             const size = (arrow.size ?? 0.09) * Math.min(w, h);
             const position = this.savedArrowPositions[index] ?? arrow;
@@ -236,8 +265,12 @@ export class GameScene extends Phaser.Scene {
         }
         this.createTrapDoors();
         this.createCatapults();
+        this.createGlassFloors();
+        this.createGlassWalls();
+        this.createFlippers();
         this.createPortals();
         this.createSpinners();
+        this.createWindmills();
         if (!this.anims.exists('trigger-press')) {
             this.anims.create({
                 key: 'trigger-press',
@@ -282,34 +315,76 @@ export class GameScene extends Phaser.Scene {
             });
     }
 
-    createSpinners() {
+    // Bumps are ordinary static polygons; x/y locate their base.
+    createBump({ x, y }) {
         const w = this.scale.width;
         const h = this.scale.height;
-        if (!this.levelData.spinners?.length) return;
-        const geometry = this.cache.json.get('spinner-geometry');
+        const sprite = this.add.image(x * w, y * h, 'bump')
+            .setOrigin(0.5, 1).setDisplaySize(0.085 * w, 0.043 * h).setDepth(-0.5);
+        const outline = [
+            [-0.0425, 0], [-0.0275, -0.015], [-0.0075, -0.043],
+            [0.0075, -0.043], [0.0275, -0.015], [0.0425, 0]
+        ];
+        const points = outline.map(([dx, dy]) => ({ x: (x + dx) * w, y: (y + dy) * h }));
+        const body = this.world.createBody({
+            position: planck.Vec2(x * w / this.SCALE, y * h / this.SCALE)
+        });
+        body.createFixture(planck.Polygon(outline.map(([dx, dy]) =>
+            planck.Vec2(dx * w / this.SCALE, dy * h / this.SCALE))), {
+            friction: 0.85, restitution: 0.1
+        });
+        return { sprite, body, points };
+    }
+
+    createSpinners() {
+        this.createRotatingObstacles(this.levelData.spinners, 'spinner');
+    }
+
+    createWindmills() {
+        this.createRotatingObstacles(this.levelData.windmills, 'windmill');
+    }
+
+    createRotatingObstacles(configs, texture) {
+        const w = this.scale.width;
+        const h = this.scale.height;
+        if (!configs?.length) return;
+        const geometry = this.cache.json.get(`${texture}-geometry`);
         // Earcut preserves concave blade edges and the transparent center hole.
         const indices = Phaser.Geom.Polygon.Earcut(geometry.vertices, geometry.holes, 2);
-        for (const config of this.levelData.spinners || []) {
+        for (const config of configs) {
             const size = (config.size ?? 0.24) * Math.min(w, h);
-            const sprite = this.add.image(config.x * w, config.y * h, 'spinner')
-                .setDisplaySize(size, size).setDepth(0);
-            // Kinematic spinners push the ball without being displaced by impacts.
-            const body = this.world.createKinematicBody({
-                position: planck.Vec2(sprite.x / this.SCALE, sprite.y / this.SCALE)
-            });
+            const height = size / (geometry.aspectRatio ?? 1);
+            const sprite = this.add.image(config.x * w, config.y * h, texture)
+                .setDisplaySize(size, height).setDepth(0);
+            if (config.flipX) sprite.setFlipX(true);
+            const mirror = config.flipX ? -1 : 1;
+            const passive = texture === 'windmill';
+            const position = planck.Vec2(sprite.x / this.SCALE, sprite.y / this.SCALE);
+            // Windmills turn freely on a fixed axle when struck by the ball.
+            const body = passive
+                ? this.world.createDynamicBody({ position, gravityScale: 0, angularDamping: 0.6 })
+                : this.world.createKinematicBody({ position });
             const points = [];
             for (let i = 0; i < geometry.vertices.length; i += 2) {
-                points.push(planck.Vec2(geometry.vertices[i] * size / this.SCALE,
-                    geometry.vertices[i + 1] * size / this.SCALE));
+                points.push(planck.Vec2(mirror * geometry.vertices[i] * size / this.SCALE,
+                    geometry.vertices[i + 1] * height / this.SCALE));
             }
             for (let i = 0; i < indices.length; i += 3) {
-                body.createFixture(planck.Polygon(indices.slice(i, i + 3).map(index => points[index])), {
-                    friction: 0.7, restitution: 0.45
+                const triangle = indices.slice(i, i + 3).map(index => points[index]);
+                // Reflection reverses winding; keep collision polygons consistently oriented.
+                if (config.flipX) triangle.reverse();
+                body.createFixture(planck.Polygon(triangle), {
+                    density: 1, friction: 0.7, restitution: 0.45
                 });
             }
             const boundaries = [0, ...geometry.holes, points.length];
             const contours = boundaries.slice(0, -1).map((start, i) => points.slice(start, boundaries[i + 1]));
-            this.spinnerBodies.push({ sprite, body, contours });
+            this.spinnerBodies.push({ sprite, body, contours, passive });
+            if (passive) {
+                const axle = this.world.createBody({ position });
+                this.world.createJoint(planck.RevoluteJoint({ enableMotor: false }, axle, body, position));
+                continue;
+            }
             const moveDuration = config.moveDuration ?? 2400;
             if (moveDuration > 0 && Number.isFinite(config.toX) && config.toX !== config.x) {
                 this.tweens.add({
@@ -327,7 +402,8 @@ export class GameScene extends Phaser.Scene {
     }
 
     syncSpinnerBodies(dt) {
-        for (const { sprite, body } of this.spinnerBodies) {
+        for (const { sprite, body, passive } of this.spinnerBodies) {
+            if (passive) continue;
             const position = body.getPosition();
             // Reach the tween's current pose during the next physics step, so
             // contacts receive the spinner's linear and angular velocity.
@@ -403,22 +479,165 @@ export class GameScene extends Phaser.Scene {
         return from;
     }
 
+    createGlassFloors() {
+        this.createGlassPanels(this.levelData.glassFloors, 'glass-floor');
+    }
+
+    createGlassWalls() {
+        this.createGlassPanels(this.levelData.glassWalls, 'glass-wall');
+    }
+
+    createGlassPanels(configs, texture) {
+        const vertical = texture === 'glass-wall';
+        for (const config of configs || []) {
+            const image = this.textures.get(texture).getSourceImage();
+            const height = vertical ? (config.height ?? 0.24) * this.scale.height
+                : (config.width ?? 0.15) * this.scale.width * image.height / image.width;
+            const width = vertical ? height * image.width / image.height
+                : (config.width ?? 0.15) * this.scale.width;
+            const x = config.x * this.scale.width;
+            // Wall y is its base; floor y is its top surface.
+            const y = config.y * this.scale.height - (vertical ? height : 0);
+            const sprite = this.add.image(x, y, texture).setOrigin(0.5, 0)
+                .setDisplaySize(width, height).setDepth(0);
+            const body = this.world.createBody({ position: planck.Vec2(x / this.SCALE, (y + height / 2) / this.SCALE) });
+            const floor = { sprite, body, x, y, width, height, vertical, broken: false };
+            body.createFixture(planck.Box(width / 2 / this.SCALE, height / 2 / this.SCALE), {
+                friction: 0.5, restitution: 0.1
+            }).setUserData({ glassFloor: floor });
+            this.glassFloors.push(floor);
+        }
+    }
+
+    breakGlassFloors() {
+        // Contacts queue breakage; Planck bodies can only be removed after stepping.
+        for (const floor of this.pendingGlassFloors) {
+            if (floor.broken) continue;
+            floor.broken = true;
+            this.world.destroyBody(floor.body);
+            floor.body = null;
+            floor.sprite.destroy();
+            this.createGlassShards(floor);
+        }
+        this.pendingGlassFloors.clear();
+    }
+
+    createGlassShards(floor) {
+        const columns = Math.max(2, Math.min(16, Math.ceil(floor.width / 22)));
+        const rows = Math.max(2, Math.min(16, Math.ceil(floor.height / 22)));
+        const cellWidth = floor.width / columns;
+        const cellHeight = floor.height / rows;
+        const impact = this.ballBody.getLinearVelocity();
+        for (let row = 0; row < rows; row++) {
+            for (let column = 0; column < columns; column++) {
+                const left = floor.x - floor.width / 2 + column * cellWidth;
+                const top = floor.y + row * cellHeight;
+                for (const triangle of [
+                    [[0, 0], [cellWidth, 0], [0, cellHeight]],
+                    [[cellWidth, 0], [cellWidth, cellHeight], [0, cellHeight]]
+                ]) {
+                    const cx = triangle.reduce((sum, p) => sum + p[0], 0) / 3;
+                    const cy = triangle.reduce((sum, p) => sum + p[1], 0) / 3;
+                    const points = triangle.map(([x, y]) => ({ x: x - cx, y: y - cy }));
+                    const body = this.world.createDynamicBody({
+                        position: planck.Vec2((left + cx) / this.SCALE, (top + cy) / this.SCALE),
+                        angularDamping: 0.15,
+                        linearVelocity: planck.Vec2(impact.x * 0.15 + (Math.random() - 0.5) * 3,
+                            impact.y * 0.15 - 1 - Math.random() * 2),
+                        angularVelocity: (Math.random() - 0.5) * 14
+                    });
+                    body.createFixture(planck.Polygon(points.map(p => planck.Vec2(p.x / this.SCALE, p.y / this.SCALE))), {
+                        density: 0.15, friction: 0.35, restitution: 0.3,
+                        // Category 2 is debris; category 4 is flippers.
+                        // Shards hit the ball and terrain, but not flippers or each other.
+                        filterCategoryBits: 0x0002, filterMaskBits: 0xfff9,
+                        filterGroupIndex: -1
+                    });
+                    const sprite = this.add.graphics().setDepth(0.25);
+                    sprite.fillStyle((column + row) % 3 === 0 ? (floor.vertical ? 0x8dbb40 : 0xffc652) : 0xdffaff, 0.9)
+                        .fillPoints(points, true).lineStyle(1, 0xffffff, 0.9).strokePoints(points, true);
+                    sprite.setPosition(left + cx, top + cy);
+                    this.glassShards.push({ body, sprite, age: 0 });
+                }
+            }
+        }
+    }
+
+    updateGlassShards(dt) {
+        this.glassShards = this.glassShards.filter(shard => {
+            shard.age += dt;
+            const position = shard.body.getPosition();
+            if (shard.age >= 4 || position.y * this.SCALE > this.scale.height + 100) {
+                this.world.destroyBody(shard.body);
+                shard.sprite.destroy();
+                return false;
+            }
+            shard.sprite.setPosition(position.x * this.SCALE, position.y * this.SCALE);
+            shard.sprite.rotation = shard.body.getAngle();
+            shard.sprite.setAlpha(Math.min(1, 4 - shard.age));
+            return true;
+        });
+    }
+
+    createFlippers() {
+        for (const config of this.levelData.flippers || []) {
+            // Width/height are fractions of the screen; size preserves the image ratio.
+            const width = config.width !== undefined ? config.width * this.scale.width
+                : (config.size ?? 0.22) * Math.min(this.scale.width, this.scale.height);
+            const image = this.textures.get('flipper').getSourceImage();
+            const height = config.height !== undefined ? config.height * this.scale.height
+                : width * image.height / image.width;
+            const angle = (config.angle ?? 0) * Math.PI / 180;
+            const sprite = this.add.image(config.x * this.scale.width, config.y * this.scale.height, 'flipper')
+                .setDisplaySize(width, height).setRotation(angle).setDepth(0);
+            const position = planck.Vec2(sprite.x / this.SCALE, sprite.y / this.SCALE);
+            const body = this.world.createDynamicBody({ position, angle, gravityScale: 0, angularDamping: 0.8 });
+            body.createFixture(planck.Box(width / 2 / this.SCALE, height / 2 / this.SCALE), {
+                // More inertia softens the rotation caused by ball impacts.
+                density: 0.8, friction: 0.8, restitution: 0.6,
+                filterCategoryBits: 0x0004, filterMaskBits: 0xfffd
+            });
+            const axle = this.world.createBody({ position });
+            this.world.createJoint(planck.RevoluteJoint({ enableMotor: false }, axle, body, position));
+            const contour = [[-width / 2, -height / 2], [width / 2, -height / 2],
+            [width / 2, height / 2], [-width / 2, height / 2]]
+                .map(([x, y]) => planck.Vec2(x / this.SCALE, y / this.SCALE));
+            this.spinnerBodies.push({ sprite, body, contours: [contour], passive: true });
+        }
+    }
+
     createCatapults() {
         for (const config of this.levelData.catapults || []) {
             const width = (config.size ?? 0.2) * Math.min(this.scale.width, this.scale.height);
             const height = width * 73 / 242;
-            // The circular fitting on the left is the fulcrum. Preserve the footprint.
+            const direction = config.flipX ? -1 : 1;
+            // Mirror around the footprint's center, keeping the fulcrum on the fitting.
             const pivotX = 24 / 242;
             const pivotY = 24 / 73;
-            const sprite = this.add.image(config.x * this.scale.width + (pivotX - 0.94) * width,
+            const originX = config.flipX ? 1 - pivotX : pivotX;
+            const sprite = this.add.image(config.x * this.scale.width + (originX - 0.94) * width,
                 config.y * this.scale.height + (pivotY - 1) * height, 'catapult')
-                .setOrigin(pivotX, pivotY).setDisplaySize(width, height).setDepth(0);
+                .setOrigin(originX, pivotY).setFlipX(!!config.flipX)
+                .setDisplaySize(width, height).setDepth(0);
+            // Separate artwork stays fixed behind the pivot as the arm swings.
+            const radius = height * 0.8;
+            const baseY = sprite.y + height * 0.4;
+            const semicircle = Array.from({ length: 33 }, (_, index) => {
+                const angle = Math.PI * index / 32;
+                return {
+                    x: sprite.x + Math.cos(angle) * radius,
+                    y: baseY - Math.sin(angle) * radius
+                };
+            });
+            const base = this.add.graphics().setDepth(-0.25);
+            base.fillStyle(0xe52323, 1).fillPoints(semicircle, true);
+            base.lineStyle(Math.max(2, width * 0.018), 0x000000, 1).strokePoints(semicircle, true);
             const catapult = {
-                sprite, config, width, height, busy: false,
-                cupOffset: { x: 211 / 242 * width, y: 27 / 73 * height }
+                sprite, base, config, width, height, direction, busy: false,
+                cupOffset: { x: direction * 211 / 242 * width, y: 27 / 73 * height }
             };
             // Cover the entire flat arm (pixels 50–235, 51–68 in the source image).
-            const armX = sprite.x + (142.5 / 242 - pivotX) * width;
+            const armX = sprite.x + direction * (142.5 / 242 - pivotX) * width;
             const armY = sprite.y + (59.5 / 73 - pivotY) * height;
             const body = this.world.createBody({ position: planck.Vec2(armX / this.SCALE, armY / this.SCALE) });
             body.createFixture(planck.Box(width * 185 / 242 / 2 / this.SCALE,
@@ -441,10 +660,11 @@ export class GameScene extends Phaser.Scene {
             if (catapult.busy || this.loadedCatapult || this.levelWon || this.dragging) continue;
             catapult.busy = true;
             this.loadedCatapult = catapult;
-            // Lift the ball from where it entered the arm, around the left pivot.
+            // Lift the ball from where it entered the arm, around its fixed pivot.
             const position = this.ballBody.getPosition();
             catapult.cupOffset = {
-                x: Phaser.Math.Clamp(position.x * this.SCALE - catapult.sprite.x,
+                x: catapult.direction * Phaser.Math.Clamp(
+                    catapult.direction * (position.x * this.SCALE - catapult.sprite.x),
                     26 / 242 * catapult.width, 211 / 242 * catapult.width),
                 y: 27 / 73 * catapult.height - this.ballRadius
             };
@@ -457,11 +677,12 @@ export class GameScene extends Phaser.Scene {
             };
             followCup();
             this.tweens.add({
-                targets: catapult.sprite, angle: -55, duration: 180, ease: 'Quad.easeIn',
+                targets: catapult.sprite, angle: -55 * catapult.direction, duration: 180, ease: 'Quad.easeIn',
                 onUpdate: followCup,
                 onComplete: () => {
                     followCup();
-                    const angle = (catapult.config.launchAngle ?? -115) * Math.PI / 180;
+                    const configuredAngle = catapult.config.launchAngle ?? -115;
+                    const angle = (catapult.direction === -1 ? 180 - configuredAngle : configuredAngle) * Math.PI / 180;
                     const speed = catapult.config.launchSpeed ?? 24;
                     this.ballBody.setType('dynamic');
                     this.ballBody.setGravityScale(1);
@@ -764,7 +985,15 @@ export class GameScene extends Phaser.Scene {
         const previous = this.ballBody.getPosition();
         const from = { x: previous.x * this.SCALE, y: previous.y * this.SCALE };
         this.syncSpinnerBodies(dt);
+        for (const snake of this.snakes) snake.step(dt);
         this.world.step(dt);
+        for (const snake of this.snakes) snake.sync();
+        this.breakGlassFloors();
+        this.updateGlassShards(dt);
+        for (const seesaw of this.seesaws) seesaw.sync();
+        for (const { sprite, body, passive } of this.spinnerBodies) {
+            if (passive) sprite.rotation = body.getAngle();
+        }
         this.openTriggeredTrapDoors();
         this.activateCatapults();
         const collisionStart = this.applyTeleporters(from);
@@ -984,6 +1213,7 @@ export class GameScene extends Phaser.Scene {
         this.ballBody.setAngularVelocity(0);
         this.ballBody.setType('static');
         completeLevel(this.levelId);
+        globalThis.LEVEL_NUMBER = Math.min(this.levelId + 1, LEVELS.length);
         for (const point of this.ballCourse) this.createTrackMark(point, 'track-mark-green');
         this.time.delayedCall(1000, this.showLevelComplete, [], this);
         this.textWin.setText("Nice Pass!").setVisible(true);

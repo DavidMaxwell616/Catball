@@ -1,12 +1,16 @@
 """Trace spinner.png's alpha into simplified collision contours (requires Pillow)."""
 import json
 import math
+import sys
 from collections import defaultdict
 from pathlib import Path
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-image = Image.open(ROOT / 'assets/images/spinner.png').convert('RGBA')
+name = sys.argv[1] if len(sys.argv) > 1 else 'spinner'
+if name not in ('spinner', 'windmill'):
+    raise SystemExit('Choose spinner or windmill')
+image = Image.open(ROOT / f'assets/images/{name}.png').convert('RGBA')
 width, height = image.size
 alpha = image.getchannel('A')
 solid = {(x, y) for y in range(height) for x in range(width) if alpha.getpixel((x, y)) >= 128}
@@ -62,8 +66,9 @@ while edges:
         contours.append(reduced)
 
 contours.sort(key=lambda points: abs(area(points)), reverse=True)
-assert len(contours) == 2, 'Expected the three-blade outline and its center hole'
-assert area(contours[0]) > 0 and area(contours[1]) < 0
+assert len(contours) == (2 if name == 'spinner' else 1)
+assert area(contours[0]) > 0
+assert all(area(contour) < 0 for contour in contours[1:])
 vertices = []
 holes = []
 for index, contour in enumerate(contours):
@@ -71,6 +76,8 @@ for index, contour in enumerate(contours):
         holes.append(len(vertices) // 2)
     for x, y in contour:
         vertices.extend([round(x / width - 0.5, 7), round(y / height - 0.5, 7)])
-result = {'source': 'assets/images/spinner.png', 'vertices': vertices, 'holes': holes}
-(ROOT / 'assets/spinner-geometry.json').write_text(json.dumps(result, indent=2) + '\n')
-print(f'Traced {len(contours[0])} outline vertices and {len(contours[1])} hole vertices.')
+result = {'source': f'assets/images/{name}.png', 'vertices': vertices, 'holes': holes}
+if name == 'windmill':
+    result['aspectRatio'] = width / height
+(ROOT / f'assets/{name}-geometry.json').write_text(json.dumps(result, indent=2) + '\n')
+print(f'Traced {name}: {sum(map(len, contours))} vertices in {len(contours)} contours.')

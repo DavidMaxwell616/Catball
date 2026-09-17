@@ -14,8 +14,9 @@ const Vec2 = (x = 0, y = 0) => ({ x, y,
     mul(value) { this.x *= value; this.y *= value; }
 });
 const context = vm.createContext({
-    Phaser: { Scene: class {}, Math: { Vector2: class {} }, Geom: { Polygon: { Earcut: triangulate } } },
-    planck: { Vec2, Circle: radius => ({ radius }), Polygon: points => ({ points }) }, LEVELS: levels, completeLevel() {}
+    Phaser: { Scene: class {}, Math: { Vector2: class {}, Clamp: (v, min, max) => Math.max(min, Math.min(max, v)) }, Geom: { Polygon: { Earcut: triangulate } } },
+    planck: { Vec2, Circle: radius => ({ radius }), Polygon: points => ({ points }), Box: (x, y) => ({ x, y }),
+        RevoluteJoint: (options, axle, body, position) => ({ options, axle, body, position }) }, LEVELS: levels, completeLevel() {}
 });
 vm.runInContext(fs.readFileSync(path.join(root, 'js/cats.js'), 'utf8').replaceAll('export ', '') +
     fs.readFileSync(path.join(root, 'js/GameScene.js'), 'utf8')
@@ -300,11 +301,13 @@ for (const key of ['black', 'black-middle', 'black-bottom']) {
     });
 }
 
-test('Level 10 spinners rotate without horizontal travel; Level 7 spinners still travel', () => {
-    for (const id of [7, 10]) {
+test('spinners and windmills have rotating colliders; only Level 7 spinners travel', () => {
+    for (const id of [7, 10, 11, 13]) {
         const scene = sceneFor(levels.find(level => level.id === id));
         const tweens = [];
-        scene.cache = { json: { get: () => spinnerGeometry } };
+        scene.cache = { json: { get: key => key === 'windmill-geometry'
+            ? JSON.parse(fs.readFileSync(path.join(root, 'assets/windmill-geometry.json')))
+            : spinnerGeometry } };
         scene.world.createKinematicBody = ({ position }) => ({
             fixtures: [],
             getPosition: () => position, getAngle: () => 0,
@@ -312,18 +315,42 @@ test('Level 10 spinners rotate without horizontal travel; Level 7 spinners still
             setLinearVelocity(value) { this.velocity = value; },
             setAngularVelocity(value) { this.spin = value; }
         });
+        const joints = [];
+        scene.world.createBody = options => options;
+        scene.world.createJoint = joint => joints.push(joint);
+        scene.world.createDynamicBody = options => {
+            assert.equal(options.gravityScale, 0);
+            const body = scene.world.createKinematicBody(options);
+            body.getAngle = () => 0.5;
+            return body;
+        };
         scene.add = { image(x, y) {
-            return { x, y, rotation: 0, setDisplaySize() { return this; }, setDepth() { return this; } };
+            return { x, y, rotation: 0, setDisplaySize() { return this; }, setDepth() { return this; },
+                setFlipX(value) { this.flipX = value; return this; } };
         } };
         scene.tweens = { add: config => tweens.push(config) };
-        scene.createSpinners();
-        const count = scene.levelData.spinners.length;
+        if (id === 11) scene.createWindmills();
+        else scene.createSpinners();
+        const count = (scene.levelData.windmills ?? scene.levelData.spinners).length;
         assert.ok(count > 0);
-        assert.equal(tweens.filter(tween => 'rotation' in tween).length, count);
-        assert.equal(tweens.filter(tween => 'x' in tween).length, id === 10 ? 0 : count);
+        assert.equal(tweens.filter(tween => 'rotation' in tween).length, id === 11 ? 0 : count);
+        if (id === 11) {
+            assert.equal(count, 9);
+            assert.equal(joints.length, 9);
+            assert.ok(joints.every(joint => joint.options.enableMotor === false));
+        }
+        assert.equal(tweens.filter(tween => 'x' in tween).length, id === 7 ? count : 0);
         assert.equal(scene.spinnerBodies.length, count);
+        if (id === 13) {
+            scene.spinnerBodies.forEach(({ sprite, contours }, index) => {
+                const mirrored = index === 1 || index === 2;
+                assert.equal(!!sprite.flipX, mirrored);
+                const size = scene.levelData.spinners[index].size * 800 / 30;
+                assert.ok(Math.abs(contours[0][0].x - spinnerGeometry.vertices[0] * size * (mirrored ? -1 : 1)) < 1e-9);
+            });
+        }
         for (const { sprite, body, contours } of scene.spinnerBodies) {
-            assert.equal(contours.length, 2, 'retain the outer blade outline and center hole');
+            assert.equal(contours.length, id === 11 ? 1 : 2, 'windmill has a solid hub; spinner has a hole');
             assert.ok(body.fixtures.length > 0);
             for (const { shape, options } of body.fixtures) {
                 assert.equal(shape.points.length, 3);
@@ -334,6 +361,11 @@ test('Level 10 spinners rotate without horizontal travel; Level 7 spinners still
             sprite.x += 6;
             sprite.rotation = Math.PI * 2 - 0.1;
             scene.syncSpinnerBodies(1 / 60);
+            if (id === 11) {
+                assert.equal(body.velocity, undefined, 'physics controls passive windmill velocity');
+                assert.equal(body.spin, undefined, 'no forced rotation before impact');
+                continue;
+            }
             assert.ok(Math.abs(body.velocity.x - 12) < 1e-9);
             assert.equal(body.velocity.y, 0);
             assert.ok(Math.abs(body.spin + 6) < 1e-9, 'rotation wraps without a full-turn velocity spike');
@@ -394,4 +426,129 @@ test('teleporters ignore misses and dragging, and cannot loop while overlapping 
     assert.equal(scene.teleporters[1].touching, true);
     assert.equal(scene.applyTeleporters(exit), exit);
     assert.equal(scene.ballBody.getPosition().x * 30, 960);
+});
+
+test('mirrored catapult lifts from the left of its pivot and launches upward to the right', () => {
+    for (const direction of [1, -1]) {
+        const scene = sceneFor(levels.find(level => level.id === 12));
+        const catapult = { direction, width: 160, height: 48,
+            sprite: { x: 400, y: 650, rotation: 0 },
+            config: { launchAngle: -115, launchSpeed: 24 } };
+        scene.ballBody.setTransform(Vec2((400 + direction * 80) / 30, 640 / 30));
+        scene.pendingCatapults = new Set([catapult]);
+        const tweens = [];
+        scene.tweens = { add: tween => tweens.push(tween) };
+        scene.activateCatapults();
+        assert.equal(Math.sign(catapult.cupOffset.x), direction);
+        assert.equal(tweens[0].angle, -55 * direction);
+        catapult.sprite.rotation = tweens[0].angle * Math.PI / 180;
+        tweens[0].onComplete();
+        const velocity = scene.ballBody.getLinearVelocity();
+        assert.equal(Math.sign(velocity.x), -direction);
+        assert.ok(velocity.y < 0);
+        assert.equal(scene.ballBody.getType(), 'dynamic');
+        assert.equal(scene.loadedCatapult, null);
+    }
+});
+
+test('Level 15 glass floors meet edge-to-edge and break once; flippers pivot freely', () => {
+    const scene = sceneFor(levels.find(level => level.id === 15));
+    const joints = [], removed = [], tweens = [];
+    const body = options => ({ ...options, fixtures: [],
+        getPosition() { return this.position; }, getAngle() { return 0.3; },
+        createFixture(shape, material) {
+            const fixture = { shape, material, setUserData(data) { this.data = data; } };
+            this.fixtures.push(fixture);
+            return fixture;
+        }
+    });
+    scene.world = { createBody: body, createDynamicBody: options => ({ ...body(options), dynamic: true }),
+        createJoint: joint => joints.push(joint), destroyBody: body => removed.push(body) };
+    scene.textures = { get: key => ({ getSourceImage: () => key === 'flipper'
+        ? { width: 321, height: 40 } : { width: 452, height: 56 } }) };
+    scene.add = { image: (x, y) => ({ x, y, setOrigin() { return this; },
+        setDisplaySize() { return this; }, setRotation(angle) { this.rotation = angle; return this; },
+        setDepth() { return this; }, destroy() { this.destroyed = true; } }) };
+    scene.tweens = { add: tween => tweens.push(tween) };
+    scene.add.graphics = () => ({
+        setDepth() { return this; }, fillStyle() { return this; }, fillPoints() { return this; },
+        lineStyle() { return this; }, strokePoints() { return this; },
+        setPosition(x, y) { this.x = x; this.y = y; return this; },
+        setAlpha(value) { this.alpha = value; }, destroy() { this.destroyed = true; }
+    });
+    scene.createGlassFloors();
+    const [left, right] = scene.glassFloors;
+    assert.equal(scene.glassFloors.length, 2);
+    assert.ok(Math.abs(left.x + left.width / 2 - (right.x - right.width / 2)) < 1e-9);
+    assert.equal(left.y, right.y);
+    assert.equal(left.body.fixtures[0].data.glassFloor, left);
+    scene.pendingGlassFloors.add(left);
+    assert.equal(removed.length, 0, 'removal is deferred until after physics');
+    scene.breakGlassFloors();
+    scene.pendingGlassFloors.add(left);
+    scene.breakGlassFloors();
+    assert.equal(removed.length, 1);
+    assert.equal(left.body, null);
+    assert.equal(right.broken, false);
+    assert.equal(left.sprite.destroyed, true);
+    assert.ok(scene.glassShards.length >= 12);
+    const shards = [...scene.glassShards];
+    for (const shard of shards) {
+        assert.equal(shard.body.dynamic, true);
+        assert.equal(shard.body.fixtures[0].shape.points.length, 3);
+        assert.notEqual(shard.body.fixtures[0].material.isSensor, true);
+        assert.ok(Number.isFinite(shard.body.angularVelocity));
+    }
+    scene.updateGlassShards(0.5);
+    assert.equal(shards[0].sprite.rotation, 0.3);
+    scene.updateGlassShards(3.6);
+    assert.equal(scene.glassShards.length, 0);
+    assert.equal(removed.length, 1 + shards.length);
+    assert.ok(shards.every(shard => shard.sprite.destroyed));
+    scene.levelData = structuredClone(scene.levelData);
+    scene.levelData.flippers[0].width = 0.3;
+    scene.levelData.flippers[0].height = 0.04;
+    scene.levelData.flippers[1].width = 0.18;
+    delete scene.levelData.flippers[1].height;
+    delete scene.levelData.flippers[2].width;
+    delete scene.levelData.flippers[2].height;
+    scene.levelData.flippers[2].size = 0.35;
+    scene.createFlippers();
+    const expectedWidths = [0.3 * 1280, 0.18 * 1280, 0.35 * 800];
+    const expectedHeights = [0.04 * 800, expectedWidths[1] * 40 / 321, expectedWidths[2] * 40 / 321];
+    scene.spinnerBodies.forEach(({ body, contours }, index) => {
+        assert.ok(Math.abs(body.fixtures[0].shape.x * 60 - expectedWidths[index]) < 1e-9);
+        assert.ok(Math.abs(body.fixtures[0].shape.y * 60 - expectedHeights[index]) < 1e-9);
+        assert.equal(contours[0][0].x, -body.fixtures[0].shape.x);
+        assert.equal(contours[0][0].y, -body.fixtures[0].shape.y);
+    });
+    assert.equal(scene.spinnerBodies.length, 3);
+    assert.equal(joints.length, 3);
+    for (const flipper of scene.spinnerBodies) {
+        assert.equal(flipper.passive, true);
+        assert.equal(flipper.body.dynamic, true);
+        assert.equal(flipper.body.gravityScale, 0);
+    }
+    assert.ok(joints.every(joint => joint.options.enableMotor === false));
+    const debrisFilter = shards[0].body.fixtures[0].material;
+    const flipperFilter = scene.spinnerBodies[0].body.fixtures[0].material;
+    assert.equal(debrisFilter.filterMaskBits & flipperFilter.filterCategoryBits, 0);
+    assert.equal(flipperFilter.filterMaskBits & debrisFilter.filterCategoryBits, 0);
+    assert.notEqual(debrisFilter.filterMaskBits & 1, 0, 'shards still collide with ball and terrain');
+    assert.notEqual(flipperFilter.filterMaskBits & 1, 0, 'ball still moves flippers');
+    scene.levelData = levels.find(level => level.id === 17);
+    scene.textures.get = () => ({ getSourceImage: () => ({ width: 67, height: 382 }) });
+    scene.createGlassWalls();
+    const wall = scene.glassFloors.at(-1);
+    assert.equal(wall.vertical, true);
+    assert.ok(Math.abs(wall.y + wall.height - 0.6 * 800) < 1e-9, 'wall base rests on middle platform');
+    assert.ok(Math.abs(wall.width / wall.height - 67 / 382) < 1e-9);
+    scene.pendingGlassFloors.add(wall);
+    scene.breakGlassFloors();
+    assert.equal(wall.broken, true);
+    assert.ok(scene.glassShards.length > 0);
+    for (const shard of scene.glassShards) {
+        const ys = shard.body.fixtures[0].shape.points.map(point => point.y * 30);
+        assert.ok(Math.max(...ys) - Math.min(...ys) <= 22, 'wall breaks into small pieces');
+    }
 });

@@ -1,12 +1,17 @@
-﻿import { LEVELS, isCompleted, isUnlocked } from './levels.js';
+﻿const TOP = 126, ROW = 160, PAGE_SIZE = 3;
 
-const TOP = 126, HEIGHT = 542, ROW = 176;
 
 export class HubScene extends Phaser.Scene {
     constructor() { super('HubScene'); }
 
+    preload() {
+        if (!this.cache.json.has('level-layouts')) {
+            this.load.json('level-layouts', 'assets/levels.json');
+        }
+    }
+
     create() {
-        this.scrollOffset = 0;
+        initializeLevels(this.cache.json.get('level-layouts'));
         this.rows = [];
         const bg = this.add.graphics();
         bg.fillGradientStyle(0x210d27, 0x210d27, 0xa72c43, 0x891e3a);
@@ -18,14 +23,10 @@ export class HubScene extends Phaser.Scene {
             for (let x = 24; x < 1280; x += 32) bg.fillCircle(x, y, 3);
         }
         this.heading(36, 24, 'SELECT A CHALLENGE', 58, '#e7dca5');
-        this.heading(1234, 40, `${LEVELS.filter(level => isCompleted(level.id)).length} / ${LEVELS.length} COMPLETE`, 32, '#e7dca5').setOrigin(1, 0);
+        //this.heading(1234, 40, `${LEVELS.filter(level => isCompleted(level.id)).length} / ${LEVELS.length} COMPLETE`, 32, '#e7dca5').setOrigin(1, 0);
         this.list = this.add.container(0, TOP);
         bg.lineStyle(2, 0xe6cddd, 0.55).lineBetween(32, 111, 1244, 111);
         LEVELS.forEach((level, index) => this.createRow(level, index));
-        const clip = this.make.graphics({ x: 0, y: 0 });
-        clip.fillStyle(0xffffff).fillRect(28, TOP, 1202, HEIGHT);
-        this.list.setMask(clip.createGeometryMask());
-        this.scrollbar = this.add.graphics();
         const footer = this.add.graphics();
         footer.fillStyle(0x250d26, 0.96).fillRect(0, 684, 1280, 116);
         footer.lineStyle(1, 0xe6cddd, 0.45).lineBetween(32, 684, 1244, 684);
@@ -40,36 +41,15 @@ export class HubScene extends Phaser.Scene {
                 this.scene.start('CatPhysicsScene', { levelId: this.selected.id });
             }
         });
-        const inList = pointer => pointer.y >= TOP && pointer.y < TOP + HEIGHT && pointer.x >= 28 && pointer.x < 1230;
-        let gesture = null;
-        const onWheel = (pointer, objects, dx, dy) => {
-            if (inList(pointer)) this.scrollTo(this.scrollOffset + dy);
-        };
-        const onDown = pointer => {
-            if (inList(pointer)) gesture = { y: pointer.y, offset: this.scrollOffset, moved: false };
-        };
-        const onMove = pointer => {
-            if (!gesture || !pointer.isDown) return;
-            if (Math.abs(pointer.y - gesture.y) > 8) gesture.moved = true;
-            if (gesture.moved) this.scrollTo(gesture.offset + gesture.y - pointer.y);
-        };
-        const onUp = pointer => {
-            if (gesture && !gesture.moved && inList(pointer)) {
-                const index = Math.floor((pointer.y - TOP + this.scrollOffset) / ROW);
-                if (LEVELS[index]) this.launchLevel(LEVELS[index]);
-            }
-            gesture = null;
-        };
-        const onOutside = () => { gesture = null; };
-        const handlers = { wheel: onWheel, pointerdown: onDown, pointermove: onMove, pointerup: onUp, pointerupoutside: onOutside };
-        Object.entries(handlers).forEach(([event, handler]) => this.input.on(event, handler));
-        this.events.once('shutdown', () => {
-            Object.entries(handlers).forEach(([event, handler]) => this.input.off(event, handler));
-            this.list.clearMask(true);
-            clip.destroy();
-        });
-        this.scrollTo(0);
-        this.selectLevel(LEVELS[0]);
+        const pageButton = (x, label, origin, direction) => this.add.text(x, 623, label, {
+            fontFamily: 'Arial', fontSize: '22px', color: '#ebcd62',
+            backgroundColor: '#321a37', padding: { x: 18, y: 10 }
+        }).setOrigin(origin, 0).setInteractive({ useHandCursor: true })
+            .on('pointerdown', () => this.setPage(this.page + direction));
+        this.previousPage = pageButton(40, '← PREVIOUS', 0, -1);
+        this.nextPage = pageButton(1238, 'NEXT →', 1, 1);
+        this.pageLabel = this.label(640, 634, '', 22, '#e7dca5').setOrigin(0.5, 0);
+        this.setPage(this.page ?? 0);
     }
 
     label(x, y, text, size, color = '#fff1f0') {
@@ -112,28 +92,46 @@ export class HubScene extends Phaser.Scene {
             emblem.lineStyle(4, 0xe7dca5).beginPath().moveTo(1117, 57).lineTo(1141, 81).lineTo(1117, 105).strokePath();
         }
         row.add(emblem);
+        row.add(this.add.zone(630, ROW / 2, 1200, ROW)
+            .setInteractive({ useHandCursor: true })
+            .on('pointerdown', () => {
+                this.selectLevel(level);
+                this.launchLevel(level);
+            }));
         this.list.add(row);
-        this.rows.push({ level, panel });
+        this.rows.push({ level, panel, row });
     }
 
-    scrollTo(offset) {
-        const contentHeight = LEVELS.length * ROW;
-        const max = Math.max(0, contentHeight - HEIGHT);
-        this.scrollOffset = Phaser.Math.Clamp(offset, 0, max);
-        this.list.y = TOP - this.scrollOffset;
-        const thumbHeight = HEIGHT * Math.min(1, HEIGHT / contentHeight);
-        const thumbY = TOP + (max ? this.scrollOffset / max : 0) * (HEIGHT - thumbHeight);
-        this.scrollbar.clear().fillStyle(0xffffff, 0.1).fillRoundedRect(1248, TOP, 6, HEIGHT, 3);
-        this.scrollbar.fillStyle(0xe6cddd, 0.65).fillRoundedRect(1248, thumbY, 6, thumbHeight, 3);
+    setPage(page) {
+        const pageCount = Math.ceil(LEVELS.length / PAGE_SIZE);
+        this.page = Phaser.Math.Clamp(page, 0, pageCount - 1);
+        const start = this.page * PAGE_SIZE;
+        this.rows.forEach(({ row }, index) => {
+            row.setVisible(index >= start && index < start + PAGE_SIZE);
+            row.setY((index - start) * ROW);
+        });
+        this.pageLabel.setText(`PAGE ${this.page + 1} / ${pageCount}`);
+        for (const [button, enabled] of [
+            [this.previousPage, this.page > 0], [this.nextPage, this.page < pageCount - 1]
+        ]) {
+            button.setAlpha(enabled ? 1 : 0.35);
+            button.input.enabled = enabled;
+        }
+        const selectedIndex = LEVELS.findIndex(level => level.id === this.selected?.id);
+        if (selectedIndex < start || selectedIndex >= start + PAGE_SIZE) {
+            this.selectLevel(LEVELS[start]);
+        } else {
+            this.selectLevel(this.selected);
+        }
     }
 
     launchLevel(level) {
-        if (!level || !isUnlocked(level.id)) return;
+        if (!level || !level.playable || !isUnlocked(level.id)) return;
         this.scene.start('CatPhysicsScene', { levelId: level.id });
     }
 
     selectLevel(level) {
-        if (!isUnlocked(level.id)) return;
+        if (!level) return;
 
         this.selected = level;
         this.rows.forEach(({ level: item, panel }) => {

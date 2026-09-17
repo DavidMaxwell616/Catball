@@ -6,12 +6,15 @@ const vm = require('node:vm');
 const root = path.resolve(__dirname, '..');
 const layouts = JSON.parse(fs.readFileSync(path.join(root, 'assets/levels.json'))).levels;
 
-function catalog(saved = []) {
-    const context = vm.createContext({ localStorage: {
+function catalog(saved = [], testMode) {
+    const context = vm.createContext({ layouts, GameScene: class {}, HubScene: class {},
+        Phaser: { Game: class {}, Scale: { FIT: 0, CENTER_BOTH: 0 } }, localStorage: {
         getItem: () => JSON.stringify(saved), setItem() {}
     } });
-    vm.runInContext(fs.readFileSync(path.join(root, 'js/levels.js'), 'utf8').replaceAll('export ', '') +
-        '\nglobalThis.api = { LEVELS, isUnlocked, isCompleted, completeLevel };', context);
+    let source = fs.readFileSync(path.join(root, 'js/main.js'), 'utf8').replace(/^import .*;\r?\n/gm, '');
+    if (testMode !== undefined) source = source.replace(/const TEST_MODE = (true|false);/, `const TEST_MODE = ${testMode};`);
+    vm.runInContext(source +
+        '\ninitializeLevels({ levels: layouts });\nglobalThis.api = { LEVELS, isUnlocked, isCompleted, completeLevel };', context);
     return context.api;
 }
 
@@ -36,8 +39,20 @@ test('all 20 hub entries have matching layouts, artwork, and valid terrain', () 
     }
 });
 
-test('saved completion of Level 10 unlocks 11 and progression reaches 20', () => {
-    const api = catalog(Array.from({ length: 10 }, (_, i) => i + 1));
+test('test mode unlocks every level without marking them complete', () => {
+    const api = catalog();
+    for (const level of api.LEVELS) {
+        assert.equal(api.isUnlocked(level.id), true);
+        assert.equal(api.isCompleted(level.id), false);
+    }
+    assert.equal(api.isUnlocked(0), false);
+    assert.equal(api.isUnlocked(21), false);
+    api.completeLevel(13);
+    assert.equal(api.isCompleted(13), true);
+});
+
+test('saved completion of Level 10 unlocks 11 and progression reaches 20 with test mode off', () => {
+    const api = catalog(Array.from({ length: 10 }, (_, i) => i + 1), false);
     assert.equal(api.isUnlocked(11), true);
     assert.equal(api.isUnlocked(12), false);
     for (let id = 11; id <= 20; id++) {
@@ -49,7 +64,7 @@ test('saved completion of Level 10 unlocks 11 and progression reaches 20', () =>
     assert.equal(restored.LEVELS.filter(level => restored.isCompleted(level.id)).length, 20);
 });
 
-test('hub scroll and hit testing reach the twentieth row', () => {
+test('hub paginates all 20 levels with bounded navigation and a partial final page', () => {
     const { LEVELS } = catalog();
     const context = vm.createContext({ LEVELS, Phaser: {
         Scene: class {}, Math: { Clamp: (value, min, max) => Math.max(min, Math.min(max, value)) }
@@ -58,11 +73,32 @@ test('hub scroll and hit testing reach the twentieth row', () => {
         .replace(/^\uFEFF?import .*;\r?\n/gm, '').replace('export class', 'class') +
         '\nglobalThis.Hub = HubScene;', context);
     const hub = new context.Hub();
-    hub.list = {};
-    hub.scrollbar = { clear() { return this; }, fillStyle() { return this; }, fillRoundedRect() { return this; } };
-    hub.scrollTo(100000);
-    assert.equal(hub.scrollOffset, 20 * 176 - 542);
-    const lastRowY = 126 + 19 * 176 - hub.scrollOffset + 88;
-    assert.ok(lastRowY >= 126 && lastRowY < 668);
-    assert.equal(Math.floor((lastRowY - 126 + hub.scrollOffset) / 176), 19);
+    hub.rows = LEVELS.map(level => ({ level, row: {
+        setVisible(value) { this.visible = value; }, setY(value) { this.y = value; }
+    } }));
+    const button = () => ({ input: {}, setAlpha(value) { this.alpha = value; } });
+    hub.previousPage = button();
+    hub.nextPage = button();
+    hub.pageLabel = { setText(value) { this.text = value; } };
+    hub.selectLevel = level => { hub.selected = level; };
+    const seen = [];
+    for (let page = 0; page < 7; page++) {
+        hub.setPage(page);
+        const visible = hub.rows.filter(item => item.row.visible);
+        assert.equal(visible.length, page === 6 ? 2 : 3);
+        visible.forEach((item, index) => {
+            assert.equal(item.row.y, index * 160);
+            seen.push(item.level.id);
+        });
+        assert.equal(hub.selected.id, page * 3 + 1);
+    }
+    assert.deepEqual(seen, Array.from({ length: 20 }, (_, i) => i + 1));
+    hub.setPage(100);
+    assert.equal(hub.page, 6);
+    assert.equal(hub.nextPage.input.enabled, false);
+    assert.equal(hub.pageLabel.text, 'PAGE 7 / 7');
+    hub.setPage(-1);
+    assert.equal(hub.page, 0);
+    assert.equal(hub.previousPage.input.enabled, false);
+    assert.equal(hub.nextPage.input.enabled, true);
 });
