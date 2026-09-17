@@ -6,7 +6,7 @@ export class HubScene extends Phaser.Scene {
 
     preload() {
         if (!this.cache.json.has('level-layouts')) {
-            this.load.json('level-layouts', 'assets/levels.json');
+            this.load.json('level-layouts', 'assets/json/levels.json');
         }
     }
 

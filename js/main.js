@@ -36,8 +36,21 @@ const config = {
     height: 800,
     backgroundColor: "#111111",
     scale: {
-        mode: Phaser.Scale.FIT,
-        autoCenter: Phaser.Scale.CENTER_BOTH
+        // CSS fills the viewport while physics keeps its original coordinate system.
+        mode: Phaser.Scale.NONE
+    },
+    callbacks: {
+        postBoot(game) {
+            const refreshViewport = () => game.scale.refresh();
+            const observer = new ResizeObserver(refreshViewport);
+            observer.observe(game.canvas.parentElement);
+            window.visualViewport?.addEventListener('resize', refreshViewport);
+            refreshViewport();
+            game.events.once('destroy', () => {
+                observer.disconnect();
+                window.visualViewport?.removeEventListener('resize', refreshViewport);
+            });
+        }
     },
     scene: [HubScene, GameScene]
 };

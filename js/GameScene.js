@@ -3,6 +3,9 @@ import { resolveCatRoles, catGeometry } from './cats.js';
 import { Seesaw } from './Seesaw.js';
 import { Snake } from './Snake.js';
 
+// Set to false to hide physics debug outlines.
+const DEBUG_DRAW = false;
+
 export class GameScene extends Phaser.Scene {
     constructor() {
         super("CatPhysicsScene");
@@ -57,9 +60,9 @@ export class GameScene extends Phaser.Scene {
         this.load.image('flipper', 'assets/images/flipper.png');
         this.load.image('snake-segment', 'assets/images/snake segment.png');
         this.load.image('spinner', 'assets/images/spinner.png');
-        this.load.json('spinner-geometry', 'assets/spinner-geometry.json');
+        this.load.json('spinner-geometry', 'assets/json/spinner-geometry.json');
         this.load.image('windmill', 'assets/images/windmill.png');
-        this.load.json('windmill-geometry', 'assets/windmill-geometry.json');
+        this.load.json('windmill-geometry', 'assets/json/windmill-geometry.json');
         this.load.spritesheet('trigger', 'assets/images/trigger.png', { frameWidth: 90, frameHeight: 41 });
         this.load.spritesheet('teleporter', 'assets/images/teleporter.png', { frameWidth: 400, frameHeight: 400 });
     }
@@ -145,14 +148,16 @@ export class GameScene extends Phaser.Scene {
     }
 
     createDebugOverlay() {
-        this.debugGraphics = this.add.graphics().setDepth(100);
+        this.debugGraphics = this.add.graphics().setDepth(100).setVisible(DEBUG_DRAW);
         this.events.on('postupdate', this.drawDebugOverlay, this);
         this.drawDebugOverlay();
     }
 
     drawDebugOverlay() {
-        if (!this.world || !this.ballBody) return;
         const graphics = this.debugGraphics;
+        if (!graphics) return;
+        graphics.setVisible(DEBUG_DRAW);
+        if (!DEBUG_DRAW || !this.world || !this.ballBody) return;
         const w = this.scale.width;
         const h = this.scale.height;
         graphics.clear().lineStyle(2, 0x66ff66, 0.9);
