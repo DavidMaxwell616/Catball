@@ -107,6 +107,10 @@ export class GameScene extends Phaser.Scene {
 
         this.createPlanckWorld();
         this.createLevel();
+        this.sourceTail = this.createCatTail(this.sourceCat);
+        for (const cat of this.targetCats) {
+            this.receivingTails.set(cat.key, this.createCatTail(cat));
+        }
         this.createUI();
         this.createDebugOverlay();
 
@@ -309,8 +313,9 @@ export class GameScene extends Phaser.Scene {
         this.sourceCat = catGeometry(sourceKey, cats[sourceKey], cats[targetKey], this.levelData.ballSpawn);
         this.targetCats = targetKeys.map(key => catGeometry(key, cats[key], cats[sourceKey]));
         this.targetCat = this.targetCats[0];
-        const spawn = this.levelData.ballSpawn ?? this.sourceCat.catchPoint;
-        this.createBall(spawn.x * w, spawn.y * h, (spawn.radius ?? 0.01375) * Math.min(w, h));
+        // Legacy spawn coordinates predate the body-anchored tails.
+        const spawn = this.sourceCat.catchPoint;
+        this.createBall(spawn.x * w, spawn.y * h, (this.levelData.ballSpawn?.radius ?? 0.01375) * Math.min(w, h));
         this.goalZone = { x: this.targetCat.x * w, y: this.targetCat.groundY * h - 50, width: 90, height: 100 };
         this.add.zone(this.sourceCat.x * w, (this.sourceCat.groundY - 0.085) * h, w * 0.12, h * 0.19)
             .setInteractive({ useHandCursor: true })
@@ -739,19 +744,7 @@ export class GameScene extends Phaser.Scene {
 
     createCatTail(cat) {
         const { tail } = cat;
-        const { patch } = tail;
-        const source = this.textures.get(`level-${this.levelId}`).getSourceImage();
-        const patchKey = `tail-background-${this.levelId}-${cat.key}`;
-        if (!this.textures.exists(patchKey)) {
-            const canvas = this.textures.createCanvas(patchKey, 100, 100);
-            canvas.context.drawImage(source,
-                source.width * patch.sampleX, source.height * patch.y,
-                source.width * patch.width, source.height * patch.height,
-                0, 0, 100, 100);
-            canvas.refresh();
-        }
-        this.add.image(this.scale.width * patch.x, this.scale.height * patch.y, patchKey)
-            .setOrigin(0).setDisplaySize(this.scale.width * patch.width, this.scale.height * patch.height);
+        // Level artwork already has the tails removed; preserve the body beneath the joint.
         const textureKey = `${cat.color}-cat`;
         const texture = this.textures.get(textureKey);
         for (let frame = 0; frame < 4; frame++) {
@@ -766,7 +759,7 @@ export class GameScene extends Phaser.Scene {
 
     releaseSourceCat() {
         this.sourceReleased = true;
-        this.sourceTail = this.createCatTail(this.sourceCat);
+        this.sourceTail ??= this.createCatTail(this.sourceCat);
         const frames = [1, 2, 3, 3, 2, 1, 0];
         let frame = 0;
         this.time.addEvent({

@@ -14,23 +14,22 @@ export function catGeometry(key, cat, other, spawn) {
     const side = cat.tailSide ?? (spawn && spawn.x !== cat.x
         ? Math.sign(spawn.x - cat.x) : (Math.sign(other.x - cat.x) || 1));
     const tail = {
-        x: cat.x + (side < 0 ? -0.06 : 0.018),
-        y: cat.groundY + 0.008,
         width: 0.043,
         height: 0.066,
         flipX: side > 0,
         ...cat.tail
     };
-    const patch = {
-        x: tail.x + (tail.flipX ? 0 : 0.007),
-        y: tail.y - tail.height,
-        width: 0.042,
-        height: 0.065,
-        sampleX: tail.x + (tail.flipX ? 0.045 : -0.045),
-        ...tail.patch
-    };
+    // Match the ball's 1.5x display scale so it fits inside the resting curl.
+    tail.width *= 1.5;
+    tail.height *= 1.5;
+    // The cropped frames join the body at (125, 80) in a 130 x 100 frame.
+    // Overlap the body's lower flank so transparent frame padding cannot leave a gap.
+    const attachmentX = cat.x + (tail.flipX ? 0.014 : -0.014);
+    const attachmentY = cat.groundY - 0.012;
+    tail.x = attachmentX - tail.width * (tail.flipX ? 5 : 125) / 130;
+    tail.y = attachmentY + tail.height * 0.2;
     return {
-        ...cat, key, color: cat.color ?? key, tail: { ...tail, patch },
+        ...cat, key, color: cat.color ?? key, tail,
         direction: tail.flipX ? 1 : -1,
         catchPoint: {
             x: tail.x + tail.width * (tail.flipX ? 50 : 80) / 130,

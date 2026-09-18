@@ -5,8 +5,8 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const levels = JSON.parse(fs.readFileSync(path.join(root, 'assets/levels.json'))).levels;
-const spinnerGeometry = JSON.parse(fs.readFileSync(path.join(root, 'assets/spinner-geometry.json')));
+const levels = JSON.parse(fs.readFileSync(path.join(root, 'assets/json/levels.json'))).levels;
+const spinnerGeometry = JSON.parse(fs.readFileSync(path.join(root, 'assets/json/spinner-geometry.json')));
 // Use the actual Phaser triangulator when supplied for integration checks.
 const triangulate = process.env.PHASER_EARCUT_PATH ? require(process.env.PHASER_EARCUT_PATH) : () => [0, 1, 2];
 const Vec2 = (x = 0, y = 0) => ({ x, y,
@@ -34,7 +34,7 @@ function sceneFor(level) {
     scene.targetCats = targetKeys.map(key => catGeometry(key, level.cats[key], level.cats[sourceKey]));
     scene.targetCat = scene.targetCats[0];
     scene.receivingTails = new Map();
-    const spawn = level.ballSpawn ?? scene.sourceCat.catchPoint;
+    const spawn = scene.sourceCat.catchPoint;
     let position = Vec2(spawn.x * 1280 / 30, spawn.y * 800 / 30);
     let velocity = Vec2();
     let type = 'dynamic';
@@ -214,7 +214,7 @@ test('dragging the initial ball releases its source tail and prevents a second c
     assert.equal(scene.sourceTail.frame, 'tail-0');
 });
 
-test('tail sprites use their cat color, orientation, and configured artwork patch', () => {
+test('tail sprites use their cat color and orientation without covering the body with patches', () => {
     const scene = sceneFor(levels[5]);
     const sprites = [];
     const frames = new Set();
@@ -240,7 +240,7 @@ test('tail sprites use their cat color, orientation, and configured artwork patc
         assert.equal(sprite.flipX, cat.tail.flipX);
         assert.equal(sprite.x, cat.tail.x * 1280);
     }
-    assert.equal(sprites.length, 4);
+    assert.equal(sprites.length, 2);
     assert.equal(frames.size, 4);
 });
 
@@ -306,7 +306,7 @@ test('spinners and windmills have rotating colliders; only Level 7 spinners trav
         const scene = sceneFor(levels.find(level => level.id === id));
         const tweens = [];
         scene.cache = { json: { get: key => key === 'windmill-geometry'
-            ? JSON.parse(fs.readFileSync(path.join(root, 'assets/windmill-geometry.json')))
+            ? JSON.parse(fs.readFileSync(path.join(root, 'assets/json/windmill-geometry.json')))
             : spinnerGeometry } };
         scene.world.createKinematicBody = ({ position }) => ({
             fixtures: [],
